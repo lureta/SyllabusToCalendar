@@ -1,75 +1,21 @@
 // ======== CONFIG ========
 
-// TODO: put your real Gemini API key here (do NOT share it!)
-const GEMINI_API_KEY = "AIzaSyB7zD3OizZb86J0Bpks5BLQ6wicBIeF35Y";
+// Put your real Gemini API key here (do NOT commit it to GitHub)
+const GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE";
 
 // Latest stable model name
 const MODEL_NAME = "gemini-2.5-flash-lite";
 
-// ======== SIMPLE HELPERS ========
+// ======== AI PARSERS (TEXT + PDF) ========
 
-// Try to extract a date from a line of text.
-function extractDate(line) {
-  const monthNames =
-    "(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)";
-  const monthDayRegex = new RegExp(`${monthNames}\\s+\\d{1,2}`, "i");
-  const numericRegex = /\b\d{1,2}[\/\-]\d{1,2}\b/;
-
-  const m1 = line.match(monthDayRegex);
-  if (m1) return m1[0];
-
-  const m2 = line.match(numericRegex);
-  if (m2) return m2[0];
-
-  return "";
-}
-
-// Try to guess a clean title from the line by removing the date.
-function guessTitle(line) {
-  const date = extractDate(line);
-  let title = line;
-  if (date) title = line.replace(date, "");
-  return title.trim().replace(/[-–—]+$/, "").trim();
-}
-
-// ======== QUICK (REGEX) PARSER ========
-
-document.getElementById("parseBtn").addEventListener("click", () => {
-  const text = document.getElementById("syllabus").value;
-  const lines = text.split("\n");
-  const events = [];
-
-  lines.forEach((line) => {
-    const lower = line.toLowerCase();
-
-    if (
-      lower.includes("quiz") ||
-      lower.includes("exam") ||
-      lower.includes("midterm") ||
-      lower.includes("final")
-    ) {
-      const cleanLine = line.trim();
-      events.push({
-        original: cleanLine,
-        title: guessTitle(cleanLine),
-        date: extractDate(cleanLine)
-      });
-    }
-  });
-
-  renderEvents(events);
-});
-
-// ======== AI PARSER (GEMINI) ========
-
-async function aiParseSyllabus(text) {
+async function aiParseSyllabusFromText(text) {
   if (!GEMINI_API_KEY || GEMINI_API_KEY === "YOUR_GEMINI_API_KEY_HERE") {
     alert("Add your Gemini API key in popup.js first.");
     return [];
   }
 
   const prompt = `
-You will be given a college course syllabus.
+You will be given a college course syllabus as plain text.
 
 Extract ONLY quizzes, exams, midterms, and finals as JSON.
 
@@ -98,7 +44,11 @@ ${text}
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }]
+        contents: [
+          {
+            parts: [{ text: prompt }]
+          }
+        ]
       })
     }
   );
@@ -110,10 +60,77 @@ ${text}
   }
 
   const data = await res.json();
+  return extractEventsFromGeminiResponse(data);
+}
+
+async function aiParseSyllabusFromPdf(file) {
+  if (!GEMINI_API_KEY || GEMINI_API_KEY === "YOUR_GEMINI_API_KEY_HERE") {
+    alert("Add your Gemini API key in popup.js first.");
+    return [];
+  }
+
+  const base64Pdf = await fileToBase64(file);
+
+  const prompt = `
+You are given a college course syllabus as a PDF document.
+
+Read the PDF and extract ONLY quizzes, exams, midterms, and finals as JSON.
+
+Return an array like:
+[
+  {"title": "Quiz 1", "date": "September 12", "original": "full original line or phrase"},
+  {"title": "Midterm Exam", "date": "10/14", "original": "full original line"}
+]
+
+Rules:
+- Only include assessments that are quizzes, exams, midterms, or finals.
+- Keep dates exactly as written (e.g. "September 12", "10/14", "09/02").
+- Do NOT include explanations or markdown code fences.
+- Return ONLY a valid JSON array.
+`;
+
+  const res = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/" +
+      MODEL_NAME +
+      ":generateContent?key=" +
+      GEMINI_API_KEY,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                inline_data: {
+                  mime_type: "application/pdf",
+                  data: base64Pdf
+                }
+              },
+              { text: prompt }
+            ]
+          }
+        ]
+      })
+    }
+  );
+
+  if (!res.ok) {
+    console.error("Gemini PDF error response", await res.text());
+    alert("AI PDF parse failed. Check console for details.");
+    return [];
+  }
+
+  const data = await res.json();
+  return extractEventsFromGeminiResponse(data);
+}
+
+// Common helper to pull JSON array out of Gemini response
+function extractEventsFromGeminiResponse(data) {
   let textOutput =
     data.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
 
-  // Strip markdown code fences or extra text around the JSON.
+  // Strip any junk around the JSON array
   let jsonText = textOutput.trim();
   const firstBracket = jsonText.indexOf("[");
   const lastBracket = jsonText.lastIndexOf("]");
@@ -130,7 +147,6 @@ ${text}
     return [];
   }
 
-  // Normalize objects
   return events.map((ev) => ({
     title: ev.title || "",
     date: ev.date || "",
@@ -138,10 +154,36 @@ ${text}
   }));
 }
 
+// ======== FILE HELPERS (PDF → base64) ========
+
+function arrayBufferToBase64(buffer) {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = arrayBufferToBase64(reader.result);
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// ======== UI HANDLERS ========
+
+// Text → AI Parse button
 document.getElementById("aiParseBtn").addEventListener("click", async () => {
   const text = document.getElementById("syllabus").value.trim();
   if (!text) {
-    alert("Paste your syllabus first.");
+    alert("Paste your syllabus first, or upload a PDF.");
     return;
   }
 
@@ -150,11 +192,36 @@ document.getElementById("aiParseBtn").addEventListener("click", async () => {
   document.getElementById("logEventsBtn").style.display = "none";
 
   try {
-    const events = await aiParseSyllabus(text);
+    const events = await aiParseSyllabusFromText(text);
     renderEvents(events);
   } catch (err) {
     console.error(err);
     alert("Something went wrong with AI parsing. Check console.");
+  }
+});
+
+// PDF upload → AI parse
+document.getElementById("pdfInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  if (file.type !== "application/pdf") {
+    alert("Please choose a PDF file.");
+    e.target.value = "";
+    return;
+  }
+
+  const resultsDiv = document.getElementById("results");
+  resultsDiv.innerHTML =
+    "<p>Uploading PDF and asking AI to parse your syllabus…</p>";
+  document.getElementById("logEventsBtn").style.display = "none";
+
+  try {
+    const events = await aiParseSyllabusFromPdf(file);
+    renderEvents(events);
+  } catch (err) {
+    console.error(err);
+    alert("Something went wrong parsing the PDF. Check console.");
   }
 });
 

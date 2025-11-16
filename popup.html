@@ -32,10 +32,6 @@
       cursor: pointer;
       font-size: 13px;
     }
-    #parseBtn {
-      background-color: #2563eb;
-      color: white;
-    }
     #aiParseBtn {
       background-color: #16a34a;
       color: white;
@@ -87,6 +83,16 @@
       background-color: #f97316;
       color: white;
     }
+    .pdf-input {
+      font-size: 11px;
+      margin-top: 6px;
+      margin-bottom: 4px;
+    }
+    .pdf-input input {
+      margin-top: 2px;
+      width: 100%;
+      font-size: 11px;
+    }
   </style>
 </head>
 <body>
@@ -94,7 +100,7 @@
   <h2>Syllabus → Exam Finder</h2>
 
   <div class="hint">
-    Paste your syllabus text below. Use either the quick parser or AI for better results.
+    Paste your syllabus text or upload a PDF, then use AI to find quizzes and exams.
   </div>
 
   <div class="hint year-input">
@@ -104,8 +110,12 @@
 
   <textarea id="syllabus" placeholder="Paste syllabus here..."></textarea>
 
-  <button id="parseBtn">Quick Parse (regex)</button>
-  <button id="aiParseBtn">AI Parse (better)</button>
+  <div class="pdf-input">
+    Or upload a syllabus PDF:
+    <input id="pdfInput" type="file" accept="application/pdf">
+  </div>
+
+  <button id="aiParseBtn">AI Parse</button>
 
   <div id="results"></div>
 
