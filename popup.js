@@ -1,7 +1,7 @@
 // ======== CONFIG ========
 
 // Put your real Gemini API key here (do NOT commit it to GitHub)
-const GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE";
+const GEMINI_API_KEY = "AIzaSyB7zD3OizZb86J0Bpks5BLQ6wicBIeF35Y";
 
 // Latest stable model name
 const MODEL_NAME = "gemini-2.5-flash-lite";
