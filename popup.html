@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Syllabus Parser</title>
+  <style>
+    body {
+      width: 300px;
+      font-family: Arial;
+      padding: 10px;
+    }
+    textarea {
+      width: 100%;
+      height: 120px;
+    }
+    button {
+      margin-top: 10px;
+      width: 100%;
+      padding: 8px;
+    }
+    #results p {
+      background: #f3f3f3;
+      padding: 5px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>Syllabus → Exam Finder</h2>
+
+  <textarea id="syllabus" placeholder="Paste syllabus here..."></textarea>
+  <button id="parseBtn">Parse</button>
+
+  <div id="results"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
