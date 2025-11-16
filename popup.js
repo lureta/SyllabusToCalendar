@@ -9,7 +9,22 @@ const MODEL_NAME = "gemini-2.5-flash-lite";
 // Remember a course title detected by AI
 let globalCourseTitle = "";
 
-// ======== SMALL HELPERS FOR DATES ========
+// If we can infer the normal class meeting time from the syllabus
+let globalClassStartTimeStr = "";
+let globalClassEndTimeStr = "";
+
+// All events currently shown in the table
+window.parsedEvents = [];
+
+// ======== SMALL HELPERS ========
+
+// Extract class code like "EDHD460" or "CMSC330" from a string
+function extractClassCode(str) {
+  if (!str) return "";
+  const m = str.match(/\b([A-Za-z]{3,4})\s*0?(\d{2,3})\b/);
+  if (!m) return "";
+  return `${m[1].toUpperCase()}${m[2]}`;
+}
 
 const MONTH_MAP = {
   january: "01", february: "02", march: "03", april: "04",
@@ -21,24 +36,53 @@ const MONTH_MAP = {
 };
 
 function extractNumericDate(text) {
-  // 10/09 or 10-9 or 10/09/2025
-  const m = text.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{4}))?\b/);
+  const m = text.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b/);
   if (!m) return null;
   const mm = m[1].padStart(2, "0");
   const dd = m[2].padStart(2, "0");
-  const year = m[3] || null;
+  let year = m[3] || null;
+  if (year && year.length === 2) {
+    year = "20" + year;
+  }
   return { mm, dd, year };
 }
 
+// MORE FORGIVING MONTH PARSER – handles "novemr 4th", "novemberrr 4", etc.
 function extractMonthWordDate(text) {
   const lower = text.toLowerCase();
+
+  // 1) Try strict "October 9" / "Oct 9, 2025" with optional st/nd/rd/th
   const monthRegex =
-    /(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\s+(\d{1,2})(?:,\s*(\d{4}))?/i;
-  const m = lower.match(monthRegex);
-  if (!m) return null;
-  const mm = MONTH_MAP[m[1].toLowerCase()];
-  const dd = m[2].padStart(2, "0");
-  const year = m[3] || null;
+    /(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{2,4}))?/i;
+  let m = lower.match(monthRegex);
+  if (m) {
+    const mm = MONTH_MAP[m[1].toLowerCase()];
+    const dd = m[2].padStart(2, "0");
+    let year = m[3] || null;
+    if (year && year.length === 2) {
+      year = "20" + year;
+    }
+    return { mm, dd, year };
+  }
+
+  // 2) Loose fallback: any word starting with jan/feb/mar/... then a day with suffix
+  const looseMonth = lower.match(/\b(jan\w*|feb\w*|mar\w*|apr\w*|may\w*|jun\w*|jul\w*|aug\w*|sep\w*|oct\w*|nov\w*|dec\w*)\b/);
+  if (!looseMonth) return null;
+
+  const monthRoot = looseMonth[1].slice(0, 3); // "novemr" -> "nov"
+  const mm = MONTH_MAP[monthRoot];
+  if (!mm) return null;
+
+  const rest = lower.slice(looseMonth.index + looseMonth[0].length);
+  const dayMatch = rest.match(/(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{2,4}))?/);
+  if (!dayMatch) return null;
+
+  const dd = dayMatch[1].padStart(2, "0");
+  let year = dayMatch[2] || null;
+  if (year && year.length === 2) {
+    year = "20" + year;
+  }
+
   return { mm, dd, year };
 }
 
@@ -50,6 +94,75 @@ function parseDateStringToParts(dateStr) {
   return { mm: info.mm, dd: info.dd, year };
 }
 
+// --- Time helpers ---
+
+function buildTimeString(hourStr, minuteStr, ampm) {
+  const hh = hourStr;
+  const mm = minuteStr || "00";
+  if (ampm) {
+    return `${hh}:${mm} ${ampm.toUpperCase()}`;
+  }
+  return `${hh}:${mm}`;
+}
+
+// FIXED: more careful time extractor so it ignores "CMSC330" and prefers "at 2 pm"
+function extractTimeRange(text) {
+  if (!text) return { start: "", end: "" };
+
+  const lower = text.toLowerCase();
+  // normalize "2 pm" → "2pm"
+  const normalized = lower.replace(/(\d)\s*(am|pm)\b/g, "$1$2");
+
+  // 1) Explicit "at 2 pm"
+  let m = normalized.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
+  if (m) {
+    const start = buildTimeString(m[1], m[2], m[3]);
+    return { start, end: "" };
+  }
+
+  // 2) Time ranges like "2–3 pm" or "2:00 pm - 3:15 pm"
+  const rangeRegex =
+    /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:to|-|–)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i;
+
+  m = normalized.match(rangeRegex);
+  if (m) {
+    const start = buildTimeString(m[1], m[2], m[3]);
+    const end = buildTimeString(m[4], m[5], m[6] || m[3]);
+    return { start, end };
+  }
+
+  // 3) Fallback: any standalone time, but with word boundaries
+  const singleRegex = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i;
+  m = normalized.match(singleRegex);
+  if (!m) return { start: "", end: "" };
+
+  const start = buildTimeString(m[1], m[2], m[3]);
+  return { start, end: "" };
+}
+
+// FIXED: reject impossible times like 33:00 entirely
+function parseTimeStringToParts(timeStr) {
+  if (!timeStr) return null;
+  const m = timeStr.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  if (!m) return null;
+  let hour = parseInt(m[1], 10);
+  const minute = parseInt(m[2], 10);
+  const ampm = m[3] ? m[3].toLowerCase() : "";
+
+  if (ampm === "pm" && hour < 12) hour += 12;
+  if (ampm === "am" && hour === 12) hour = 0;
+
+  // reject impossible hours/minutes
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null;
+  }
+
+  return {
+    hh: String(hour).padStart(2, "0"),
+    min: String(minute).padStart(2, "0")
+  };
+}
+
 function escapeHTML(str) {
   return (str || "")
     .replace(/&/g, "&amp;")
@@ -58,64 +171,90 @@ function escapeHTML(str) {
     .replace(/"/g, "&quot;");
 }
 
-// ======== VOICE PARSING ========
+// ========= VOICE HELPERS =========
 
-// Split one transcript into multiple exam/quiz events
-function parseVoiceTranscriptMulti(transcript) {
-  const clauses = transcript
-    .split(/\b(?:and also|and then|and|also|plus)\b/gi)
-    .map(c => c.trim())
-    .filter(c => c.length > 0);
+function parseVoiceSegment(segment) {
+  if (!segment || !segment.trim()) return null;
 
-  const events = [];
-  clauses.forEach((clause) => {
-    const ev = parseVoiceClause(clause);
-    if (ev) events.push(ev);
-  });
-  return events;
-}
+  // Date – now robust to "novemr 4th", "november 4", "nov 4"
+  let info = extractNumericDate(segment);
+  if (!info) info = extractMonthWordDate(segment);
+  if (!info) return null;
+  const date = `${info.mm}/${info.dd}`;
 
-// Parse a single clause into {title, date, original, course}
-function parseVoiceClause(text) {
-  const originalText = text.trim();
-  if (!originalText) return null;
+  const lower = segment.toLowerCase();
+  let label = "Exam";
+  let num = "";
 
-  const lower = originalText.toLowerCase();
+  const m = lower.match(/\b(quiz|exam|test|midterm|final)\s*(\d+)?/);
+  if (m) {
+    const kind = m[1];
+    if (kind === "quiz") label = "Quiz";
+    else if (kind === "midterm") label = "Midterm";
+    else if (kind === "final") label = "Final Exam";
+    else label = "Exam";
+    if (m[2]) num = " " + m[2];
+  } else if (lower.includes("quiz")) label = "Quiz";
+  else if (lower.includes("midterm")) label = "Midterm";
+  else if (lower.includes("final")) label = "Final Exam";
 
-  // Date
-  let info = extractNumericDate(lower) || extractMonthWordDate(lower);
-  if (!info) return null; // if no date, skip
-  const mmdd = info.mm + "/" + info.dd;
+  let baseTitle = label + num;
 
-  // Course – CMSC 330, EDHD 460, etc.
-  let course = "";
-  const courseMatch = originalText.match(/\b([A-Za-z]{3,4}\s*\d{2,3})\b/);
-  if (courseMatch) {
-    course = courseMatch[1].replace(/\s+/, " ").toUpperCase();
-  } else if (globalCourseTitle) {
-    course = globalCourseTitle;
+  const classCode =
+    extractClassCode(segment) || extractClassCode(globalCourseTitle);
+  const finalTitle = classCode ? `${classCode}: ${baseTitle}` : baseTitle;
+
+  const { start, end } = extractTimeRange(segment);
+
+  // ensure times always have am/pm for VOICE events
+  function ensureAmPm(timeStr) {
+    if (!timeStr) return timeStr;
+    if (/\b(am|pm)\b/i.test(timeStr)) return timeStr;
+    return timeStr + " PM";
   }
 
-  // What kind of assessment?
-  let kind = "Exam";
-  if (/\bquiz\b/i.test(lower)) kind = "Quiz";
-  if (/\bmid[-\s]?term\b/i.test(lower)) kind = "Midterm";
-  if (/\bfinal\b/i.test(lower)) kind = "Final Exam";
+  let startTimeStr = start;
+  let endTimeStr = end;
 
-  // Optional number: "exam 1", "quiz 2"
-  let num = "";
-  const numMatch = lower.match(/(?:exam|quiz|test)\s*(\d+)/i);
-  if (numMatch) num = numMatch[1];
+  if (!startTimeStr && globalClassStartTimeStr) {
+    startTimeStr = globalClassStartTimeStr;
+  }
+  if (!endTimeStr && globalClassEndTimeStr) {
+    endTimeStr = globalClassEndTimeStr;
+  }
 
-  let shortTitle = kind;
-  if (num) shortTitle += " " + num;
+  startTimeStr = ensureAmPm(startTimeStr);
+  endTimeStr = ensureAmPm(endTimeStr);
 
   return {
-    title: shortTitle,
-    date: mmdd,
-    original: originalText,
-    course: course
+    title: finalTitle,
+    date,
+    time: startTimeStr,
+    endTime: endTimeStr,
+    original: segment,
+    course: classCode || ""
   };
+}
+
+function parseVoiceTranscriptIntoEvents(fullTranscript) {
+  if (!fullTranscript) return [];
+
+  // Split on common connectors, but each piece still gets scanned for a full exam line
+  const segments = fullTranscript.split(/\b(?:and|also|then)\b/i);
+  const results = [];
+
+  segments.forEach((seg) => {
+    const ev = parseVoiceSegment(seg);
+    if (ev) results.push(ev);
+  });
+
+  // If splitting fails, try the whole thing as one
+  if (results.length === 0) {
+    const ev = parseVoiceSegment(fullTranscript);
+    if (ev) results.push(ev);
+  }
+
+  return results;
 }
 
 // ======== AI PARSERS (TEXT + PDF) ========
@@ -131,33 +270,29 @@ You will be given a college course syllabus as plain text.
 
 Your job:
 1. Detect the course title, like "EDHD460 Educational Psychology".
-2. Extract ONLY quizzes, exams, midterms, and finals.
+2. Detect the usual class meeting time range, like "11:00 am–12:15 pm".
+3. Extract ONLY quizzes, exams, midterms, and finals.
 
 Return a JSON array like:
 [
   {
     "title": "Week 1 Reading Quiz",
     "date": "09/02",
+    "time": "11:00 am",
+    "end_time": "12:15 pm",
     "original": "full original line here",
-    "course": "EDHD460 Educational Psychology"
-  },
-  {
-    "title": "Exam I",
-    "date": "10/09",
-    "original": "...",
     "course": "EDHD460 Educational Psychology"
   }
 ]
 
 Rules:
 - Only include assessments that are quizzes, exams, midterms, or finals.
-- Keep dates exactly as written if possible (e.g. "September 12", "10/14", "09/02").
+- Keep dates exactly as written if possible.
+- Use 12-hour times with "am" or "pm" when appropriate.
+- If an exam does not list its own time, use the normal class meeting time for "time" and "end_time".
 - Include a "course" field in each object with the course title if you can find it.
 - Do NOT include explanations or markdown code fences.
 - Return ONLY a valid JSON array.
-
-Syllabus text:
-${text}
 `;
 
   const res = await fetch(
@@ -169,11 +304,7 @@ ${text}
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }]
-          }
-        ]
+        contents: [{ parts: [{ text: prompt + "\n\nSyllabus text:\n" + text }] }]
       })
     }
   );
@@ -201,20 +332,17 @@ You are given a college course syllabus as a PDF document.
 
 Your job:
 1. Detect the course title, like "EDHD460 Educational Psychology".
-2. Extract ONLY quizzes, exams, midterms, and finals.
+2. Detect the usual class meeting time range, like "11:00 am–12:15 pm".
+3. Extract ONLY quizzes, exams, midterms, and finals.
 
 Return a JSON array like:
 [
   {
     "title": "Week 1 Reading Quiz",
     "date": "09/02",
+    "time": "11:00 am",
+    "end_time": "12:15 pm",
     "original": "full original line or phrase",
-    "course": "EDHD460 Educational Psychology"
-  },
-  {
-    "title": "Exam I",
-    "date": "10/09",
-    "original": "...",
     "course": "EDHD460 Educational Psychology"
   }
 ]
@@ -222,6 +350,8 @@ Return a JSON array like:
 Rules:
 - Only include assessments that are quizzes, exams, midterms, or finals.
 - Keep dates exactly as written if possible.
+- Use 12-hour times with "am" or "pm" when appropriate.
+- If an exam does not list its own time, use the normal class meeting time for "time" and "end_time".
 - Include a "course" field in each object with the course title if you can find it.
 - Do NOT include explanations or markdown code fences.
 - Return ONLY a valid JSON array.
@@ -263,13 +393,101 @@ Rules:
   return extractEventsFromGeminiResponse(data);
 }
 
-// Common helper to pull JSON array out of Gemini response
-function extractEventsFromGeminiResponse(data) {
-  let textOutput =
-    data.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
+// ======== NORMALIZERS FOR GEMINI RESPONSE ========
 
-  // Strip any junk around the JSON array
-  let jsonText = textOutput.trim();
+function guessDateFromObject(ev) {
+  const dateLike = (val) => {
+    if (typeof val !== "string") return false;
+    return !!(extractNumericDate(val) || extractMonthWordDate(val));
+  };
+
+  const dateKeys = ["date", "when", "due", "deadline", "exam_date", "quiz_date"];
+  for (const k of dateKeys) {
+    if (ev[k] && dateLike(ev[k])) return ev[k];
+  }
+
+  for (const [k, v] of Object.entries(ev)) {
+    if (k.toLowerCase() === "course" || k.toLowerCase() === "original") continue;
+    if (dateLike(v)) return v;
+  }
+  return "";
+}
+
+function guessTitleFromObject(ev, usedDateValue) {
+  const titleKeys = ["title", "name", "assessment", "assignment", "quiz", "exam", "label"];
+  for (const k of titleKeys) {
+    if (ev[k] && typeof ev[k] === "string" && ev[k] !== usedDateValue) {
+      return ev[k];
+    }
+  }
+
+  for (const [k, v] of Object.entries(ev)) {
+    if (typeof v !== "string") continue;
+    if (v === usedDateValue) continue;
+    if (k.toLowerCase() === "course" || k.toLowerCase() === "original") continue;
+    return v;
+  }
+
+  return "";
+}
+
+function guessTimeFromObject(ev) {
+  const check = (val) => {
+    if (typeof val !== "string") return "";
+    const r = extractTimeRange(val);
+    return r.start || "";
+  };
+
+  const keys = ["time", "start_time", "startTime", "class_time_start"];
+  for (const k of keys) {
+    if (ev[k]) {
+      const t = check(ev[k]);
+      if (t) return t;
+    }
+  }
+
+  for (const [k, v] of Object.entries(ev)) {
+    const t = check(v);
+    if (t) return t;
+  }
+
+  return "";
+}
+
+function guessEndTimeFromObject(ev) {
+  const check = (val) => {
+    if (typeof val !== "string") return "";
+    const r = extractTimeRange(val);
+    return r.end || r.start || "";
+  };
+
+  const keys = ["end_time", "endTime", "class_time_end"];
+  for (const k of keys) {
+    if (ev[k]) {
+      const t = check(ev[k]);
+      if (t) return t;
+    }
+  }
+
+  for (const [k, v] of Object.entries(ev)) {
+    const t = check(v);
+    if (t) return t;
+  }
+
+  return "";
+}
+
+function extractEventsFromGeminiResponse(data) {
+  let rawText = "[]";
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  for (const p of parts) {
+    if (p.text) {
+      rawText = p.text;
+      break;
+    }
+  }
+
+  let jsonText = rawText.trim();
   const firstBracket = jsonText.indexOf("[");
   const lastBracket = jsonText.lastIndexOf("]");
   if (firstBracket !== -1 && lastBracket !== -1) {
@@ -285,18 +503,75 @@ function extractEventsFromGeminiResponse(data) {
     return [];
   }
 
+  if (!Array.isArray(events)) {
+    console.error("Gemini JSON is not an array:", events);
+    return [];
+  }
+
   globalCourseTitle = "";
+  globalClassStartTimeStr = "";
+  globalClassEndTimeStr = "";
+
   const normalized = events.map((ev) => {
-    const course =
-      ev.course || ev.class || ev.course_title || ev.courseName || "";
-    if (!globalCourseTitle && course) {
-      globalCourseTitle = course;
+    if (typeof ev === "string") {
+      const dateGuess = guessDateFromObject({ text: ev }) || ev;
+      const timeGuessRange = extractTimeRange(ev);
+      const timeGuess = timeGuessRange.start;
+      const endGuess = timeGuessRange.end;
+      const titleGuess = ev.replace(dateGuess, "").trim() || ev;
+      return {
+        title: titleGuess,
+        date: dateGuess,
+        time: timeGuess,
+        endTime: endGuess,
+        original: ev,
+        course: ""
+      };
     }
+
+    if (typeof ev !== "object" || ev === null) {
+      return {
+        title: "",
+        date: "",
+        time: "",
+        endTime: "",
+        original: String(ev),
+        course: ""
+      };
+    }
+
+    const rawCourse =
+      ev.course || ev.class || ev.course_title || ev.courseName || ev.course_code || "";
+
+    if (!globalCourseTitle && rawCourse) globalCourseTitle = rawCourse;
+
+    const dateValue = guessDateFromObject(ev);
+    const timeValue = guessTimeFromObject(ev);
+    const endTimeValue = guessEndTimeFromObject(ev);
+    let baseTitle = guessTitleFromObject(ev, dateValue);
+
+    // Save the detected "normal" class time the first time we see one
+    if (!globalClassStartTimeStr && timeValue) {
+      globalClassStartTimeStr = timeValue;
+    }
+    if (!globalClassEndTimeStr && endTimeValue) {
+      globalClassEndTimeStr = endTimeValue;
+    }
+
+    const classCode = extractClassCode(rawCourse);
+    const finalTitle =
+      classCode && baseTitle ? `${classCode}: ${baseTitle}` : baseTitle;
+
+    const original =
+      ev.original || ev.line || ev.text || JSON.stringify(ev);
+
     return {
-      title: ev.title || "",
-      date: ev.date || "",
-      original: ev.original || "",
-      course: course || ""
+      title: finalTitle || "",
+      date: dateValue || "",
+      time: timeValue || "",
+      endTime: endTimeValue || "",
+      original,
+      course: rawCourse || ""
     };
   });
 
@@ -328,15 +603,19 @@ function fileToBase64(file) {
 
 // ======== UI HANDLERS ========
 
-// 1. Text → AI Parse button
+// TEXT PARSE
 document.getElementById("aiParseBtn").addEventListener("click", async () => {
   const text = document.getElementById("syllabus").value.trim();
+  const loading = document.getElementById("aiLoading");
+  const resultsDiv = document.getElementById("results");
+
   if (!text) {
     alert("Paste your syllabus first.");
     return;
   }
 
-  const resultsDiv = document.getElementById("results");
+  loading.textContent = "AI is reading your syllabus…";
+  loading.classList.add("loading");
   resultsDiv.innerHTML = "<p>Asking AI to parse your syllabus…</p>";
 
   try {
@@ -345,24 +624,30 @@ document.getElementById("aiParseBtn").addEventListener("click", async () => {
   } catch (err) {
     console.error(err);
     alert("Something went wrong with AI parsing. Check console.");
+  } finally {
+    loading.textContent = "";
+    loading.classList.remove("loading");
   }
 });
 
-// 2. PDF → AI Parse button
+// PDF PARSE
 document.getElementById("pdfParseBtn").addEventListener("click", async () => {
   const fileInput = document.getElementById("pdfInput");
   const file = fileInput.files && fileInput.files[0];
+  const loading = document.getElementById("aiLoading");
+  const resultsDiv = document.getElementById("results");
+
   if (!file) {
     alert("Choose a syllabus PDF first.");
     return;
   }
-
   if (file.type !== "application/pdf") {
     alert("Please choose a PDF file.");
     return;
   }
 
-  const resultsDiv = document.getElementById("results");
+  loading.textContent = "AI is reading your PDF…";
+  loading.classList.add("loading");
   resultsDiv.innerHTML =
     "<p>Uploading PDF and asking AI to parse your syllabus…</p>";
 
@@ -372,10 +657,13 @@ document.getElementById("pdfParseBtn").addEventListener("click", async () => {
   } catch (err) {
     console.error(err);
     alert("Something went wrong parsing the PDF. Check console.");
+  } finally {
+    loading.textContent = "";
+    loading.classList.remove("loading");
   }
 });
 
-// 3. Voice button → SpeechRecognition
+// VOICE PARSE
 document.getElementById("voiceBtn").addEventListener("click", () => {
   const SpeechRecognition =
     window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -390,52 +678,52 @@ document.getElementById("voiceBtn").addEventListener("click", () => {
   recognition.maxAlternatives = 1;
 
   const voiceBtn = document.getElementById("voiceBtn");
-  const voiceLabel = document.getElementById("voiceBtnLabel");
   const voiceStatus = document.getElementById("voiceStatus");
-  const voiceViz = document.getElementById("voiceViz");
+  const loading = document.getElementById("aiLoading");
 
   recognition.onstart = () => {
-    voiceBtn.classList.add("listening");
-    voiceViz.classList.add("listening");
-    voiceLabel.textContent = "🎙 Listening…";
-    if (voiceStatus) voiceStatus.textContent = "Speak your exams and dates.";
+    voiceBtn.textContent = "Listening…";
+    voiceStatus.textContent = "Say your class, exam name, date, and time.";
   };
 
   recognition.onerror = (event) => {
     console.error("Speech error:", event.error);
     alert("Voice error: " + event.error);
+    voiceBtn.textContent = "AI Parse from voice";
+    voiceStatus.textContent = "";
+    loading.textContent = "";
+    loading.classList.remove("loading");
   };
 
   recognition.onend = () => {
-    voiceBtn.classList.remove("listening");
-    voiceViz.classList.remove("listening");
-    voiceLabel.textContent = "🎙 Add exam by voice";
-    if (voiceStatus && !voiceStatus.textContent.startsWith("Added")) {
-      voiceStatus.textContent = "";
-    }
+    voiceBtn.textContent = "AI Parse from voice";
   };
 
   recognition.onresult = (event) => {
     const transcript = event.results[0][0].transcript;
     console.log("Heard:", transcript);
 
-    const newEvents = parseVoiceTranscriptMulti(transcript);
-    if (!newEvents || newEvents.length === 0) {
-      alert(
-        "I couldn't find any dates in what you said. Try something like 'Exam 1 on October 9 and a quiz on October 11'."
-      );
-      if (voiceStatus) voiceStatus.textContent = "";
-      return;
-    }
+    // now AI-style parsing -> show spinner
+    loading.textContent = "AI is parsing your voice input…";
+    loading.classList.add("loading");
 
-    // Show ONLY the voice-added events
-    renderEvents(newEvents);
+    try {
+      const newEvents = parseVoiceTranscriptIntoEvents(transcript);
+      if (!newEvents.length) {
+        alert(
+          "I could not find a date in what you said. Try: 'CMSC 330 exam 1 on October 9 at 2 pm'."
+        );
+        voiceStatus.textContent = "";
+        return;
+      }
 
-    if (voiceStatus) {
+      window.parsedEvents = newEvents;
+      renderEvents(newEvents);
       voiceStatus.textContent =
-        newEvents.length === 1
-          ? "Added 1 exam from your voice."
-          : `Added ${newEvents.length} exams/quizzes from your voice.`;
+        "Added " + newEvents.length + " exam(s) from your voice.";
+    } finally {
+      loading.textContent = "";
+      loading.classList.remove("loading");
     }
   };
 
@@ -448,7 +736,7 @@ function renderEvents(events) {
   const resultsDiv = document.getElementById("results");
 
   if (!events || events.length === 0) {
-    resultsDiv.innerHTML = "<p>No quizzes or exams found.</p>";
+    resultsDiv.innerHTML = "<p>No quizzes or exams found yet.</p>";
     window.parsedEvents = [];
     return;
   }
@@ -461,53 +749,61 @@ function renderEvents(events) {
     )}</div>`;
   }
 
+  if (globalClassStartTimeStr) {
+    const endDisp = globalClassEndTimeStr ? ` – ${escapeHTML(globalClassEndTimeStr)}` : "";
+    html += `<div class="course-badge">Class time: ${escapeHTML(
+      globalClassStartTimeStr
+    )}${endDisp}</div>`;
+  }
+
   html += `
     <table>
       <tr>
         <th>Title</th>
         <th>Date</th>
+        <th>Start</th>
+        <th>End</th>
         <th>Add</th>
       </tr>
   `;
 
   events.forEach((ev, index) => {
-    // Display like "EDHD460 Educational Psychology: Exam 1"
-// Extract only the class code, like "EDHD460" or "CMSC330"
-function extractClassCode(str) {
-  if (!str) return "";
-  const m = str.match(/\b([A-Za-z]{3,4}\s*\d{2,3})\b/);
-  return m ? m[1].replace(/\s+/, "") : "";
-}
-
-    let displayTitle = ev.title || "";
-
-    // Use only the class code, not the full name
-    const coursePrefix =
-    extractClassCode(ev.course) ||
-    extractClassCode(globalCourseTitle) ||
-    "";
-
-    // Final formatted title
-    if (coursePrefix && displayTitle) {
-    displayTitle = `${coursePrefix}: ${displayTitle}`;
-    }
-
-    const safeTitle = escapeHTML(displayTitle);
+    const safeTitle = escapeHTML(ev.title || "");
     const safeDate = escapeHTML(ev.date || "");
+    const safeTime = escapeHTML(ev.time || "");
+    const safeEnd = escapeHTML(ev.endTime || "");
 
     html += `
       <tr>
         <td>
           <input type="text"
+                 class="title-input"
                  data-index="${index}"
                  data-field="title"
                  value="${safeTitle}" />
         </td>
         <td>
           <input type="text"
+                 class="date-input"
                  data-index="${index}"
                  data-field="date"
                  value="${safeDate}" />
+        </td>
+        <td>
+          <input type="text"
+                 class="time-input"
+                 placeholder="e.g. 2:00 pm"
+                 data-index="${index}"
+                 data-field="time"
+                 value="${safeTime}" />
+        </td>
+        <td>
+          <input type="text"
+                 class="end-input"
+                 placeholder="e.g. 3:15 pm"
+                 data-index="${index}"
+                 data-field="endTime"
+                 value="${safeEnd}" />
         </td>
         <td>
           <button class="addBtn" data-index="${index}">Add</button>
@@ -520,7 +816,6 @@ function extractClassCode(str) {
   window.parsedEvents = events;
   resultsDiv.innerHTML = html;
 
-  // Track edits (title/date textboxes)
   resultsDiv.querySelectorAll("input").forEach((input) => {
     input.addEventListener("input", (evt) => {
       const idx = parseInt(evt.target.getAttribute("data-index"), 10);
@@ -529,7 +824,6 @@ function extractClassCode(str) {
     });
   });
 
-  // Handle "Add" buttons
   resultsDiv.querySelectorAll(".addBtn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const idx = parseInt(btn.getAttribute("data-index"), 10);
@@ -537,9 +831,22 @@ function extractClassCode(str) {
       addToCalendar(ev);
     });
   });
+
+  // show card + auto scroll + pop glow
+  const card  = document.getElementById("resultsCard");
+  const shell = document.querySelector(".shell");
+
+  card.style.display = "block";
+  card.classList.add("has-content");
+
+  card.classList.remove("pop");
+  void card.offsetWidth; // reflow
+  card.classList.add("pop");
+
+  const targetTop = card.offsetTop - 16;
+  shell.scrollTo({ top: targetTop, behavior: "smooth" });
 }
 
-// Open a pre-filled Google Calendar event page for this event.
 function addToCalendar(ev) {
   if (!ev || !ev.date) {
     alert("This event is missing a date.");
@@ -556,25 +863,73 @@ function addToCalendar(ev) {
   const month = parts.mm;
   const day = parts.dd;
 
-  const startDateStr = `${year}${month}${day}`;
+  let startStr;
+  let endStr;
 
-  // End date = next day (all-day event range)
-  const startDateObj = new Date(`${year}-${month}-${day}T00:00:00`);
-  startDateObj.setDate(startDateObj.getDate() + 1);
-  const endYear = startDateObj.getFullYear();
-  const endMonth = String(startDateObj.getMonth() + 1).padStart(2, "0");
-  const endDay = String(startDateObj.getDate()).padStart(2, "0");
-  const endDateStr = `${endYear}${endMonth}${endDay}`;
+  const timeParts = ev.time ? parseTimeStringToParts(ev.time) : null;
+  const endPartsRaw = ev.endTime
+    ? parseTimeStringToParts(ev.endTime)
+    : (globalClassEndTimeStr
+        ? parseTimeStringToParts(globalClassEndTimeStr)
+        : null);
 
-  let course = ev.course || globalCourseTitle || "";
-  let title = ev.title || "Class assessment";
-  if (course) {
-    title = `${course}: ${title}`;
+  if (timeParts) {
+    const hh = parseInt(timeParts.hh, 10);
+    const mm = parseInt(timeParts.min, 10);
+
+    const startDate = new Date(
+      parseInt(year, 10),
+      parseInt(month, 10) - 1,
+      parseInt(day, 10),
+      hh,
+      mm,
+      0
+    );
+
+    let endDate;
+    if (endPartsRaw) {
+      const eh = parseInt(endPartsRaw.hh, 10);
+      const em = parseInt(endPartsRaw.min, 10);
+      endDate = new Date(
+        parseInt(year, 10),
+        parseInt(month, 10) - 1,
+        parseInt(day, 10),
+        eh,
+        em,
+        0
+      );
+      if (endDate <= startDate) {
+        endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+      }
+    } else {
+      endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+    }
+
+    const pad = (n) => String(n).padStart(2, "0");
+    const fmt = (d) =>
+      `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(
+        d.getHours()
+      )}${pad(d.getMinutes())}00`;
+
+    startStr = fmt(startDate);
+    endStr = fmt(endDate);
+  } else {
+    const startDateStr = `${year}${month}${day}`;
+    const startDateObj = new Date(`${year}-${month}-${day}T00:00:00`);
+    startDateObj.setDate(startDateObj.getDate() + 1);
+    const endYear = startDateObj.getFullYear();
+    const endMonth = String(startDateObj.getMonth() + 1).padStart(2, "0");
+    const endDay = String(startDateObj.getDate()).padStart(2, "0");
+    const endDateStr = `${endYear}${endMonth}${endDay}`;
+    startStr = startDateStr;
+    endStr = endDateStr;
   }
+
+  const title = ev.title || "Class assessment";
 
   const params = new URLSearchParams({
     text: title,
-    dates: `${startDateStr}/${endDateStr}`,
+    dates: `${startStr}/${endStr}`,
     details: ev.original || ""
   });
 
