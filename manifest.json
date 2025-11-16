@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Syllabus to Calendar",
   "version": "1.0.0",
-  "description": "Parse quizzes and exams from a syllabus and send them to Google Calendar.",
+  "description": "Use AI (and your voice) to pull quizzes and exams from a syllabus and add them to Google Calendar.",
   "permissions": [],
   "host_permissions": [
     "https://generativelanguage.googleapis.com/*"
