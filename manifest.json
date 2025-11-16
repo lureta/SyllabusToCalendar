@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Syllabus to Calendar",
+  "name": "Syllabus Study Garden",
   "version": "1.0.0",
-  "description": "Use AI (and your voice) to pull quizzes and exams from a syllabus and add them to Google Calendar.",
+  "description": "Turn your syllabus into calendar-ready exams and quizzes using AI text, PDF, and voice.",
   "permissions": [],
   "host_permissions": [
     "https://generativelanguage.googleapis.com/*"
